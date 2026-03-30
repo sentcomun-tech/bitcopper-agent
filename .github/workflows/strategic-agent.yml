@@ -1,0 +1,43 @@
+name: Bitcopper Strategic Agent
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # Cada 5 minutos, 24/7
+  workflow_dispatch:          # Trigger manual para probar
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Estado persistente: ciclos, PnL acumulado, historial, cooldowns
+      - name: Restore agent state
+        uses: actions/cache@v4
+        with:
+          path: /tmp/bitcopper_strategic_state.json
+          key: strategic-state-${{ github.run_id }}
+          restore-keys: |
+            strategic-state-
+
+      - name: Run strategic agent
+        env:
+          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          TWILIO_ACCOUNT_SID:   ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:    ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_WHATSAPP_FROM: ${{ secrets.TWILIO_WHATSAPP_FROM }}
+          TWILIO_WHATSAPP_TO:   ${{ secrets.TWILIO_WHATSAPP_TO }}
+        run: node strategic-agent.js
+
+      - name: Save agent state
+        uses: actions/cache@v4
+        if: always()
+        with:
+          path: /tmp/bitcopper_strategic_state.json
+          key: strategic-state-${{ github.run_id }}
