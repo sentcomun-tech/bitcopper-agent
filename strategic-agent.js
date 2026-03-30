@@ -262,16 +262,4 @@ async function main() {
   saveState(state);
 }
 
-async function test() {
-  const lines = [
-    `🤖 *BITCOPPER AGENT v3 — TEST*`,
-    `━━━━━━━━━━━━━━━━━━━━`,
-    `✅ Agente operativo`,
-    `📰 Noticias monitoreadas: CoinDesk · CoinTelegraph · Decrypt · TheBlock`,
-    `📊 ETH $2,066 · TAO $309 · SOL $84 · BTC $67,438`,
-    `⏰ Corriendo cada 5 min — 24/7`,
-    `_Bitcopper Technologies LLC · Calama, Chile_`,
-  ];
-  await sendWA(lines);
-}
-test().catch(err=>{ console.error("❌",err.message); process.exit(1); });
+main().catch(err=>{ console.error("❌",err.message); process.exit(1); });
