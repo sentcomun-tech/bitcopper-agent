@@ -257,7 +257,29 @@ async function main() {
     const ok=await sendWA(lines);
     if (ok) { state.alerts["WEEKLY_REPORT"]=Date.now(); sent++; }
   }
-
+// ── HEARTBEAT DIARIO 7AM ─────────────────────────────────
+  const hour = parseInt(new Date().toLocaleString("es-CL", { timeZone: "America/Santiago", hour: "numeric", hour12: false }));
+  if (hour === 7 && canAlert(state, "HEARTBEAT_DAILY", 20)) {
+    const tv = Object.entries(ASSETS).reduce((s, [sym, info]) => s + prices[sym].price * info.qty, 0);
+    const tc = Object.entries(ASSETS).reduce((s, [, info]) => s + info.avgCost * info.qty, 0);
+    const pnlTotal = tv - tc;
+    const lines = [
+      `🤖 *Bitcopper Agent — Activo*`,
+      `━━━━━━━━━━━━━━━━━━━━`,
+      `📊 *Precios:*`,
+      ...Object.entries(ASSETS).map(([sym, info]) =>
+        `  ${sym}: ${fmtP(prices[sym].price)} (${prices[sym].change24h?.toFixed(1)}%)`
+      ),
+      ``,
+      `💼 Portfolio: $${tv.toFixed(0)} | PnL total: ${pnlTotal >= 0 ? "+" : ""}$${pnlTotal.toFixed(0)}`,
+      `🎯 Mes: $${state.monthlyPnl.toFixed(0)} / $4,000`,
+      `😱 F&G: ${fg.value} (${fg.label}) | BTC Dom: ${btcDom}%`,
+      ``,
+      `✅ Todo monitoreado. Buen día Pedro! 🚀`,
+    ];
+    const ok = await sendWA(lines);
+    if (ok) { state.alerts["HEARTBEAT_DAILY"] = Date.now(); sent++; }
+  }
   console.log(sent===0?"\n✅ Sin alertas — todo en zona neutral.":`\n📱 ${sent} alerta(s) enviada(s).`);
   saveState(state);
 }
