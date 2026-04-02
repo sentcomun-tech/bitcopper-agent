@@ -782,8 +782,7 @@ async function main() {
       try {
         const tradeResumen = wt.map(t =>
           `${t.sym}|${t.tipo}|E:${t.entryPrice}→S:${t.exitPrice}|PnL:${t.pnl>0?"+":""}$${t.pnl}(${t.pnlPct}%)|${t.duracionH}h|F&G:${t.fg}|${t.resultado}|EntradaPor:"${t.razonEntrada}"|SalidaPor:"${t.razonSalida}"`
-        ).join("
-");
+        ).join("\n");
 
         const prompt = `Eres el analista de rendimiento de Bitcopper para Pedro (Calama, Chile).
 Meta semanal: $1,000 USDT. Capital: $15,000. Activos: BTC/ETH/SOL/TAO/XAU.
@@ -796,8 +795,7 @@ HISTORIAL ACUMULADO POR ACTIVO:
 ${Object.entries(state.positions).map(([s,p])=>`${s}: PnL total $${p.profitAccum.toFixed(0)} | ${p.cycleCount} ciclos`).join(" | ")}
 
 NOTAS DE APRENDIZAJE ANTERIORES:
-${state.learningNotes.slice(-4).join("
-") || "Primera semana de operación."}
+${state.learningNotes.slice(-4).join("\n") || "Primera semana de operación."}
 
 Analiza el rendimiento y responde ÚNICAMENTE con este JSON (sin markdown):
 {
@@ -912,8 +910,8 @@ main().catch(err => {
 
 // ─── INSTRUCCIONES ────────────────────────────────────────────
 /*
-CRON — CADA 15 MINUTOS (máxima sensibilidad):
-  */15 * * * * /usr/bin/node /ruta/bitcopper_v4_max.js >> /var/log/bitcopper.log 2>&1
+CRON — CADA 5 MINUTOS (GitHub Actions máximo):
+  * /5 * * * * /usr/bin/node /ruta/bitcopper_v4_max.js >> /var/log/bitcopper.log 2>&1
 
 VARIABLES DE ENTORNO:
   ANTHROPIC_API_KEY
