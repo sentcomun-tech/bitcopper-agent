@@ -118,18 +118,20 @@ const NEWS_FEEDS = [
 
 // ─── COOLDOWNS Y CONFIGURACIÓN ───────────────────────────────
 const STATE_FILE   = "/tmp/bitcopper_v41_state.json";
+const GIST_ID      = "fcb66e3c3aa96220b17040fd72295fab";
+const GIST_FILE    = "state.json";
 const NEWS_CD_H    = 2;    // noticias: 2h entre alertas
 const HEARTBEAT_CD = 20;   // heartbeat diario
 
 // ─── HELPERS ─────────────────────────────────────────────────
-function get(url, raw = false) {
+function get(url, raw = false, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     try {
       const u = new URL(url);
       https.get({
         hostname: u.hostname,
         path: u.pathname + u.search,
-        headers: { "User-Agent": "BitcopperAgent/4.1" }
+        headers: { "User-Agent": "BitcopperAgent/4.1", ...extraHeaders }
       }, res => {
         if (res.statusCode === 301 || res.statusCode === 302)
           return get(res.headers.location, raw).then(resolve).catch(reject);
@@ -204,6 +206,37 @@ function loadState() {
 
 function saveState(s) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2));
+}
+
+async function loadStateFromGist() {
+  const token = process.env.GIST_TOKEN;
+  if (!token) return null;
+  try {
+    const d = await get(`https://api.github.com/gists/${GIST_ID}`,
+      false, { "Authorization": `token ${token}`, "User-Agent": "BitcopperAgent/4.1", "Accept": "application/vnd.github.v3+json" });
+    const content = d?.files?.[GIST_FILE]?.content;
+    if (!content || content === "{}") return null;
+    return JSON.parse(content);
+  } catch(e) {
+    console.log("  ⚠️ Gist load error:", e.message?.slice(0,50));
+    return null;
+  }
+}
+
+async function saveStateToGist(s) {
+  const token = process.env.GIST_TOKEN;
+  if (!token) return;
+  try {
+    await post(
+      `https://api.github.com/gists/${GIST_ID}`,
+      { files: { [GIST_FILE]: { content: JSON.stringify(s, null, 2) } } },
+      { "Authorization": `token ${token}`, "Content-Type": "application/json",
+        "User-Agent": "BitcopperAgent/4.1", "Accept": "application/vnd.github.v3+json" }
+    );
+    console.log("  ✅ Estado guardado en Gist");
+  } catch(e) {
+    console.log("  ⚠️ Gist save error:", e.message?.slice(0,50));
+  }
 }
 
 function canAlert(state, key, hours) {
@@ -549,7 +582,19 @@ async function main() {
   console.log(`\n🤖 Bitcopper v4.1 MAX — ${new Date().toLocaleString("es-CL", { timeZone: "America/Santiago" })}`);
   console.log("━".repeat(50));
 
-  const state = loadState();
+  // Cargar estado: Gist primero, fallback a local
+  let state = await loadStateFromGist();
+  if (!state) {
+    console.log("  📂 Sin estado en Gist — cargando local");
+    state = loadState();
+  } else {
+    console.log("  ✅ Estado cargado desde Gist");
+    // Migración: asegurar campos nuevos
+    if (!state.tradeLog)      state.tradeLog      = [];
+    if (!state.weeklyTrades)  state.weeklyTrades  = [];
+    if (!state.learningNotes) state.learningNotes = [];
+    if (!state.totalCycles)   state.totalCycles   = 0;
+  }
   const now   = new Date();
 
   // Resets
@@ -901,6 +946,7 @@ Analiza el rendimiento y responde ÚNICAMENTE con este JSON (sin markdown):
 
   console.log(sent === 0 ? "\n✅ Sin alertas." : `\n📱 ${sent} alerta(s) enviada(s).`);
   saveState(state);
+  await saveStateToGist(state);
 }
 
 main().catch(err => {
