@@ -446,7 +446,7 @@ Responde SOLO JSON sin markdown:
 }
 
 // ─── MOTOR DE DECISIÓN CLAUDE — MAX SENSIBILIDAD ─────────────
-async function claudeDecide(sym, price, pos, fg, btcDom, news, asset) {
+async function claudeDecide(sym, price, pos, fg, btcDom, news, asset, state) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return null;
 
@@ -745,7 +745,7 @@ async function main() {
     const cooldownOk  = canAlert(state, `${sym}_DECIDE`, asset.cooldownH);
 
     if ((hasMovement || hasNews || isStopZone) && cooldownOk) {
-      const result = await claudeDecide(sym, price, pos, fg, btcDom, relevantNews, asset);
+      const result = await claudeDecide(sym, price, pos, fg, btcDom, relevantNews, asset, state);
 
       if (result && result.decision !== "ESPERAR") {
         // Si es COMPRAR: guardar pendingConfirmation en Gist ANTES de enviar WhatsApp
@@ -1130,4 +1130,3 @@ PARA MÁS/MENOS SENSIBILIDAD:
   Bajar swingPct y activationPct → más señales, ciclos más cortos
   Subir swingPct y activationPct → menos señales, ganancias mayores por ciclo
 */
-
