@@ -175,6 +175,7 @@ function loadState() {
     if (!s.tradeLog)      s.tradeLog      = [];
     if (!s.weeklyTrades)  s.weeklyTrades  = [];
     if (!s.learningNotes) s.learningNotes = [];
+    if (!s.learningRules) s.learningRules = null;
     return s;
   }
   catch {
@@ -188,6 +189,7 @@ function loadState() {
       tradeLog:       [],
       weeklyTrades:   [],
       learningNotes:  [],
+      learningRules:  null,   // reglas activas generadas por aprendizaje
       lastWeekReset:  Date.now(),
       lastMonthReset: Date.now(),
     };
@@ -355,6 +357,94 @@ function getAffectedAssets(title, desc) {
     .map(([sym]) => sym);
 }
 
+// ─── GENERADOR DE REGLAS DE APRENDIZAJE ─────────────────────
+async function generateLearningRules(state, fg, btcDom) {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return null;
+
+  const trades = state.tradeLog || [];
+  if (trades.length < 3) return null; // necesita al menos 3 trades
+
+  const ganancias  = trades.filter(t => t.pnl > 0);
+  const perdidas   = trades.filter(t => t.pnl <= 0);
+  const winRate    = trades.length > 0 ? (ganancias.length / trades.length * 100).toFixed(0) : 0;
+
+  // Calcular win rate por activo
+  const porActivo = {};
+  for (const sym of ["BTC","ETH","SOL","TAO","XAU"]) {
+    const t = trades.filter(x => x.sym === sym);
+    const g = t.filter(x => x.pnl > 0);
+    porActivo[sym] = t.length > 0
+      ? { trades: t.length, winRate: (g.length/t.length*100).toFixed(0), pnlTotal: t.reduce((s,x)=>s+x.pnl,0).toFixed(0) }
+      : { trades: 0, winRate: "0", pnlTotal: "0" };
+  }
+
+  // Análisis de condiciones ganadoras
+  const condGanadoras = ganancias.map(t =>
+    `${t.sym}|+$${t.pnl}|${t.duracionH}h|F&G:${t.fg}|${t.razonEntrada}`
+  ).join("\n");
+
+  const condPerdedoras = perdidas.map(t =>
+    `${t.sym}|$${t.pnl}|${t.duracionH}h|F&G:${t.fg}|${t.razonEntrada}`
+  ).join("\n");
+
+  const prompt = `Eres el motor de aprendizaje de Bitcopper para Pedro.
+Estrategia: R:R 3:1 minimo. Meta: $1,000/semana, $4,000/mes. Capital: $15,000.
+
+HISTORIAL COMPLETO (${trades.length} trades):
+Win rate global: ${winRate}%
+PnL total: $${trades.reduce((s,t)=>s+t.pnl,0).toFixed(0)}
+
+WIN RATE POR ACTIVO:
+${Object.entries(porActivo).map(([s,d])=>`${s}: ${d.winRate}% (${d.trades} trades, $${d.pnlTotal})`).join("\n")}
+
+CONDICIONES DE TRADES GANADORES:
+${condGanadoras || "Sin trades ganadores aun"}
+
+CONDICIONES DE TRADES PERDEDORES:
+${condPerdedoras || "Sin trades perdedores aun"}
+
+CONTEXTO ACTUAL:
+F&G: ${fg.value} (${fg.label}) | BTC Dom: ${btcDom}%
+
+APRENDIZAJES PREVIOS:
+${(state.learningNotes||[]).slice(-6).join("\n") || "Primera generacion de reglas"}
+
+Genera reglas de decision optimizadas basadas en el historial real.
+Responde SOLO JSON sin markdown:
+{
+  "version": "${new Date().toLocaleDateString('es-CL')}",
+  "mejoresActivos": ["BTC","ETH"],
+  "reglasEntrada": {
+    "BTC": "condicion optima de entrada para BTC basada en historial",
+    "ETH": "condicion optima para ETH",
+    "SOL": "condicion optima para SOL",
+    "TAO": "condicion optima para TAO",
+    "XAU": "condicion optima para XAU"
+  },
+  "fgOptimo": { "compra": "rango F&G ideal para comprar", "venta": "rango para vender" },
+  "duracionOptima": "duracion promedio de trades ganadores en horas",
+  "evitar": "condiciones donde historicamente se pierde",
+  "prioridadSemanal": "que hacer esta semana para llegar a $1,000",
+  "confianzaPorActivo": { "BTC": "ALTA|MEDIA|BAJA", "ETH": "ALTA|MEDIA|BAJA", "SOL": "ALTA|MEDIA|BAJA", "TAO": "ALTA|MEDIA|BAJA", "XAU": "ALTA|MEDIA|BAJA" }
+}`;
+
+  try {
+    const r = await post(
+      "https://api.anthropic.com/v1/messages",
+      { model: "claude-sonnet-4-20250514", max_tokens: 800,
+        messages: [{ role: "user", content: prompt }] },
+      { "Content-Type": "application/json", "x-api-key": key,
+        "anthropic-version": "2023-06-01" }
+    );
+    const raw = r.body?.content?.[0]?.text ?? "{}";
+    return JSON.parse(raw.replace(/```json|```/g,"").trim());
+  } catch(e) {
+    console.log("  ⚠️ Learning rules error:", e.message?.slice(0,50));
+    return null;
+  }
+}
+
 // ─── MOTOR DE DECISIÓN CLAUDE — MAX SENSIBILIDAD ─────────────
 async function claudeDecide(sym, price, pos, fg, btcDom, news, asset) {
   const key = process.env.ANTHROPIC_API_KEY;
@@ -367,57 +457,69 @@ async function claudeDecide(sym, price, pos, fg, btcDom, news, asset) {
     ? news.slice(0, 5).map((n, i) => `[${i+1}] ${n.source}: "${n.title}"\n${n.desc}`).join("\n\n")
     : "Sin noticias relevantes recientes.";
 
-  const fgSignal = fg.value < 20 ? "PÁNICO EXTREMO → señal COMPRA muy fuerte"
+  const fgSignal = fg.value < 20 ? "PANICO EXTREMO → señal COMPRA muy fuerte"
     : fg.value < 35 ? "MIEDO → sesgo compra"
     : fg.value > 80 ? "EUFORIA → señal VENTA muy fuerte"
     : fg.value > 65 ? "CODICIA → sesgo venta"
     : "NEUTRAL";
+
+  // Inyectar reglas de aprendizaje activo
+  const rules = pos.learningRules || state?.learningRules;
+  const reglasStr = rules ? `
+REGLAS APRENDIDAS DE HISTORIAL REAL (aplica estas por encima de las generales):
+- Mejores activos: ${(rules.mejoresActivos||[]).join(", ")}
+- Regla específica para ${sym}: ${rules.reglasEntrada?.[sym] || "sin datos suficientes"}
+- F&G óptimo compra: ${rules.fgOptimo?.compra || "no definido"}
+- Confianza histórica en ${sym}: ${rules.confianzaPorActivo?.[sym] || "MEDIA"}
+- Evitar: ${rules.evitar || "no definido"}
+- Duración óptima: ${rules.duracionOptima || "no definido"}
+` : "Sin reglas de aprendizaje aun — usando criterios generales.";
 
   // Calcular zonas dinámicas desde precio actual
   const buyTarget  = price * (1 - asset.swingPct);
   const sellTarget = price * (1 + asset.swingPct);
   const stopPrice  = pos.entryPrice ? pos.entryPrice * (1 - asset.swingPct * asset.stopMult) : 0;
 
-  const prompt = `Eres el motor de decisión de Bitcopper v4.1 MAX SENSIBILIDAD para Pedro.
-Objetivo: $4,000/mes capturando oscilaciones frecuentes de ${asset.swingPct * 100}%+.
-Capital total: $15,000. Capital en ${sym}: $${asset.capital}.
+  // R:R dinamico
+  const riskPct = asset.swingPct * asset.stopMult;
+  const rrStop  = price * (1 - riskPct);
+  const rrTgt3  = price * (1 + riskPct * 3);
+  const rrTgt4  = price * (1 + riskPct * 4);
 
-ACTIVO: ${sym}
-Precio actual: ${fmtP(price)}
-Precio anterior (última ejecución 15 min atrás): ${fmtP(pos.lastPrice)}
-Cambio en últimos 15 min: ${changePctFromLast.toFixed(3)}%
-Fase: ${pos.phase}
-${pos.phase === "HOLDING"
-  ? `Entrada: ${fmtP(pos.entryPrice)} | Cambio desde entrada: ${changePctFromEntry.toFixed(2)}% | Stop mental: ${fmtP(stopPrice)}`
-  : `Sin posición — zona de compra ideal: ${fmtP(buyTarget)}`}
+  const prompt = `Eres el motor de decision de Bitcopper v4.1 para Pedro.
+Meta semanal: $1,000. Capital en ${sym}: $${asset.capital}.
+FILOSOFIA: Solo entrar con Riesgo:Recompensa minimo 3:1.
 
-MERCADO:
-F&G: ${fg.value}/100 (${fg.label}) → ${fgSignal}
-BTC Dominancia: ${btcDom}%
+ACTIVO: ${sym} | Precio: ${fmtP(price)} | F&G: ${fg.value} (${fgSignal})
+Cambio reciente: ${changePctFromLast.toFixed(2)}% | BTC Dom: ${btcDom}%
+Fase: ${pos.phase}${pos.phase === 'HOLDING' ? ` | Entrada: ${fmtP(pos.entryPrice)} | PnL: ${changePctFromEntry.toFixed(2)}%` : ''}
 
-NOTICIAS RECIENTES (${sym}):
+NOTICIAS (${sym}):
 ${newsStr}
 
-REGLAS MAX SENSIBILIDAD:
-- COMPRAR: fase=WAITING_BUY + precio bajó ≥${asset.swingPct * 100}% + F&G < 70 + noticias no son catastróficas
-- VENDER: fase=HOLDING + precio subió ≥${asset.swingPct * 100}% desde entrada + F&G no < 20
-- PREPARAR_COMPRA: precio cayendo fuerte hacia zona compra, aún no llegó pero viene en camino (alerta anticipada)
-- PREPARAR_VENTA: precio acercándose al target de venta, aún no llegó (alerta anticipada)
-- STOP_DEFENSIVO: fase=HOLDING + precio cayó ≥${(asset.swingPct * asset.stopMult * 100).toFixed(1)}% desde entrada
-- ESPERAR: ninguna condición clara
+${reglasStr}
 
-IMPORTANTE: Sé sensible. Prefiere PREPARAR_COMPRA o PREPARAR_VENTA sobre ESPERAR cuando el movimiento es claro.
-Si el precio ya bajó ${(asset.swingPct * 0.6 * 100).toFixed(1)}%+ y sigue bajando, activa PREPARAR_COMPRA.
-Si el precio ya subió ${(asset.swingPct * 0.6 * 100).toFixed(1)}%+ desde entrada y sigue subiendo, activa PREPARAR_VENTA.
+CALCULO R:R si entra ahora:
+Stop: ${fmtP(rrStop)} | Target 3:1: ${fmtP(rrTgt3)} | Target 4:1: ${fmtP(rrTgt4)}
 
-Responde ÚNICAMENTE con este JSON (sin texto adicional, sin markdown):
+REGLAS:
+- COMPRAR: soporte claro + target 3:1 alcanzable + F&G<70 + noticias no bajistas
+- VENDER: precio alcanzo target 3:1 o 4:1
+- PREPARAR_COMPRA: estructura bajista agotandose, soporte visible
+- PREPARAR_VENTA: precio cerca del target
+- STOP_DEFENSIVO: rompio soporte con fuerza
+- ESPERAR: sin R:R 3:1 claro. Calidad sobre cantidad.
+
+Responde SOLO JSON sin markdown:
 {
-  "decision": "COMPRAR" | "VENDER" | "PREPARAR_COMPRA" | "PREPARAR_VENTA" | "STOP_DEFENSIVO" | "ESPERAR",
-  "confianza": "ALTA" | "MEDIA" | "BAJA",
-  "razon": "máximo 2 líneas",
-  "precioObjetivo": 0,
-  "gananciaEstimada": 0,
-  "urgencia": "INMEDIATA" | "PROXIMA_HORA" | "HOY"
+  "decision": "COMPRAR"|"VENDER"|"PREPARAR_COMPRA"|"PREPARAR_VENTA"|"STOP_DEFENSIVO"|"ESPERAR",
+  "confianza": "ALTA"|"MEDIA"|"BAJA",
+  "razon": "max 2 lineas con R:R",
+  "stopPrice": ${rrStop.toFixed(2)},
+  "targetPrice": ${rrTgt3.toFixed(2)},
+  "ratio": "3:1",
+  "gananciaEstimada": ${(asset.capital * riskPct * 3).toFixed(0)},
+  "urgencia": "INMEDIATA"|"PROXIMA_HORA"|"HOY"
 }`;
 
   try {
@@ -646,24 +748,35 @@ async function main() {
       const result = await claudeDecide(sym, price, pos, fg, btcDom, relevantNews, asset);
 
       if (result && result.decision !== "ESPERAR") {
-        const lines = buildMessage(sym, result, price, asset, pos);
-        const ok = await sendWA(lines);
+        // Si es COMPRAR: guardar pendingConfirmation en Gist ANTES de enviar WhatsApp
+        // Así cuando Pedro responda "1", el webhook ya encuentra el pending
+        if (result.decision === "COMPRAR") {
+          state.pendingConfirmation = {
+            sym,
+            price,
+            razon:       result.razon,
+            stopPrice:   result.stopPrice  || price * (1 - asset.swingPct * asset.stopMult),
+            targetPrice: result.targetPrice || price * (1 + asset.swingPct * asset.stopMult * 3),
+            ratio:       result.ratio || "3:1",
+            ts:          Date.now(),
+          };
+          state.alerts[`${sym}_DECIDE`] = Date.now();
+          saveState(state);
+          await saveStateToGist(state);  // guardar ANTES del WhatsApp
+          console.log(`  💾 Pending guardado en Gist: ${sym} a ${fmtP(price)}`);
+        }
+
+        const msgLines = buildMessage(sym, result, price, asset, pos);
+        const ok = await sendWA(msgLines);
 
         if (ok) {
-          state.alerts[`${sym}_DECIDE`] = Date.now();
+          if (result.decision !== "COMPRAR") {
+            state.alerts[`${sym}_DECIDE`] = Date.now();
+          }
           sent++;
 
-          // Actualizar estado
+          // Actualizar estado según decisión
           if (result.decision === "COMPRAR") {
-            state.positions[sym] = {
-              ...pos,
-              phase:        "HOLDING",
-              entryPrice:   price,
-              entryTs:      Date.now(),
-              razonEntrada: result.razon,
-              lastPrice:    price,
-              cycleCount:   pos.cycleCount + 1,
-            };
             state.totalCycles++;
           } else if (result.decision === "VENDER" && pos.entryPrice) {
             const pnl    = (price - pos.entryPrice) * (asset.capital / pos.entryPrice);
@@ -805,7 +918,11 @@ async function main() {
   }
 
   // ── INFORME SEMANAL CON P&L + APRENDIZAJE ────────────────
-  if (now.getDay() === 1 && hour >= 10 && hour <= 12 && canAlert(state, "WEEKLY_REPORT", 120)) {
+  // Enviar cualquier lunes entre 8AM y 20PM, con cooldown de 20h para no repetir
+  const isMonday = now.getDay() === 1;
+  const isWeeklyWindow = hour >= 8 && hour <= 20;
+  const weeklyNotSentToday = canAlert(state, "WEEKLY_REPORT", 20);
+  if (isMonday && isWeeklyWindow && weeklyNotSentToday) {
     const wt        = state.weeklyTrades || [];
     const ganancias = wt.filter(t => t.pnl > 0);
     const perdidas  = wt.filter(t => t.pnl <= 0);
@@ -823,35 +940,45 @@ async function main() {
     // Llamar a Claude para análisis de aprendizaje
     let aprendizaje = null;
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (apiKey && wt.length > 0) {
+    if (apiKey) {
       try {
         const tradeResumen = wt.map(t =>
           `${t.sym}|${t.tipo}|E:${t.entryPrice}→S:${t.exitPrice}|PnL:${t.pnl>0?"+":""}$${t.pnl}(${t.pnlPct}%)|${t.duracionH}h|F&G:${t.fg}|${t.resultado}|EntradaPor:"${t.razonEntrada}"|SalidaPor:"${t.razonSalida}"`
         ).join("\n");
 
+        const posicionesActuales = Object.entries(state.positions || {})
+          .map(([s,p]) => p.phase === "HOLDING"
+            ? `${s}: HOLDING desde $${p.entryPrice} | Ciclos: ${p.cycleCount} | PnL acum: $${(p.profitAccum||0).toFixed(0)}`
+            : `${s}: USDT | Ciclos: ${p.cycleCount} | PnL acum: $${(p.profitAccum||0).toFixed(0)}`
+          ).join("\n");
+
         const prompt = `Eres el analista de rendimiento de Bitcopper para Pedro (Calama, Chile).
-Meta semanal: $1,000 USDT. Capital: $15,000. Activos: BTC/ETH/SOL/TAO/XAU.
-Resultado semana: $${totalPnl.toFixed(0)} | ${wt.length} trades | Win rate: ${winRate}% | F&G actual: ${fg.value}
+Meta semanal: $1,000 USDT. Meta mensual: $4,000. Capital: $15,000. Activos: BTC/ETH/SOL/TAO/XAU.
+Estrategia: R:R minimo 3:1. Solo entradas con soporte tecnico claro.
+Semana: PnL $${totalPnl.toFixed(0)} | ${wt.length} trades cerrados | Win rate: ${winRate}% | F&G actual: ${fg.value}
+
+POSICIONES ACTUALES:
+${posicionesActuales}
 
 TRADES CERRADOS ESTA SEMANA:
-${tradeResumen}
+${wt.length > 0 ? tradeResumen : "Sin trades cerrados esta semana — capital en USDT esperando oportunidades R:R 3:1"}
 
-HISTORIAL ACUMULADO POR ACTIVO:
-${Object.entries(state.positions).map(([s,p])=>`${s}: PnL total $${p.profitAccum.toFixed(0)} | ${p.cycleCount} ciclos`).join(" | ")}
+HISTORIAL ACUMULADO:
+${Object.entries(state.positions||{}).map(([s,p])=>`${s}: $${(p.profitAccum||0).toFixed(0)} acum | ${p.cycleCount||0} ciclos`).join(" | ")}
 
-NOTAS DE APRENDIZAJE ANTERIORES:
-${state.learningNotes.slice(-4).join("\n") || "Primera semana de operación."}
+APRENDIZAJES PREVIOS:
+${state.learningNotes.slice(-4).join("\n") || "Primera semana de operacion."}
 
-Analiza el rendimiento y responde ÚNICAMENTE con este JSON (sin markdown):
+Analiza y responde UNICAMENTE con este JSON sin markdown:
 {
-  "resumen": "1 línea resultado semana",
-  "loQueFunciono": "qué activos/momentos/condiciones generaron las ganancias",
-  "loQueNoFunciono": "por qué se perdió en los trades negativos, qué falló",
-  "patronesDetectados": "patrones en entradas ganadoras vs perdedoras (F&G, hora, activo, duración)",
-  "ajustesRecomendados": "3 ajustes concretos y específicos para la próxima semana",
+  "resumen": "1 linea resultado semana",
+  "loQueFunciono": "que activos/condiciones generaron ganancias o protegieron capital",
+  "loQueNoFunciono": "que fallo o por que no hubo trades esta semana",
+  "patronesDetectados": "patrones R:R, F&G optimo, activos mas rentables",
+  "ajustesRecomendados": "3 ajustes concretos para proxima semana considerando R:R 3:1",
   "activosPrioridad": ["BTC","ETH"],
-  "alertaRiesgo": "riesgo sistémico detectado o null",
-  "proyeccionProxSemana": "expectativa de PnL y condiciones favorables próxima semana"
+  "alertaRiesgo": "riesgo sistemico o null",
+  "proyeccionProxSemana": "expectativa PnL y condiciones favorables considerando F&G actual"
 }`;
 
         const r = await post(
@@ -937,10 +1064,36 @@ Analiza el rendimiento y responde ÚNICAMENTE con este JSON (sin markdown):
     const ok = await sendWA(lines);
     if (ok) {
       state.alerts["WEEKLY_REPORT"] = Date.now();
-      state.weeklyTrades  = [];
-      state.weeklyPnl     = 0;
-      state.lastWeekReset = Date.now();
+      // Generar nuevas reglas de aprendizaje basadas en historial completo
+      console.log("  🧠 Generando reglas de aprendizaje...");
+      const newRules = await generateLearningRules(state, fg, btcDom);
+      if (newRules) {
+        state.learningRules = newRules;
+        console.log("  ✅ Reglas de aprendizaje actualizadas v" + newRules.version);
+        // Notificar a Pedro las nuevas reglas
+        const rulesMsg = [
+          `🧠 *REGLAS ACTUALIZADAS — Bitcopper v4.1*`,
+          `━━━━━━━━━━━━━━━━━━━━`,
+          `📅 Versión: ${newRules.version}`,
+          ``,
+          `🏆 *Activos prioritarios:* ${(newRules.mejoresActivos||[]).join(" · ")}`,
+          ``,
+          `📊 *Confianza por activo:*`,
+          ...Object.entries(newRules.confianzaPorActivo||{}).map(([s,c]) =>
+            `  ${c==="ALTA"?"🟢":c==="MEDIA"?"🟡":"🔴"} ${s}: ${c}`
+          ),
+          ``,
+          `🎯 *Esta semana:* ${newRules.prioridadSemanal}`,
+          ``,
+          `⚠️ *Evitar:* ${newRules.evitar}`,
+        ].join("\n");
+        await sendWA(rulesMsg.split("\n"));
+      }
+      state.weeklyTrades   = [];
+      state.weeklyPnl      = 0;
+      state.lastWeekReset  = Date.now();
       sent++;
+      console.log("  📊 Informe semanal enviado y estado reseteado");
     }
   }
 
@@ -977,3 +1130,4 @@ PARA MÁS/MENOS SENSIBILIDAD:
   Bajar swingPct y activationPct → más señales, ciclos más cortos
   Subir swingPct y activationPct → menos señales, ganancias mayores por ciclo
 */
+
