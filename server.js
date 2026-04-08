@@ -221,14 +221,43 @@ async function handleWebhook(req, res) {
       }
     }
 
+  } else if (msgBody.toUpperCase().startsWith("VENTA ")) {
+    // Comando: VENTA BTC 90000 — registra target de venta
+    const parts = msgBody.split(" ");
+    if (parts.length === 3) {
+      const sym    = parts[1].toUpperCase();
+      const target = parseFloat(parts[2]);
+      if (sym && target > 0 && state.positions?.[sym]) {
+        state.positions[sym].targetPrice = target;
+        await saveGist(GIST_TOKEN, state);
+        const entry = state.positions[sym].entryPrice || 0;
+        const gain  = entry > 0 ? ((target - entry) / entry * 100).toFixed(1) : "?";
+        const msg = [
+          `🎯 *TARGET REGISTRADO — ${sym}*`,
+          `━━━━━━━━━━━━━━━━━━━━`,
+          `💰 Entrada: ${fmtP(entry)}`,
+          `🎯 Venta target: ${fmtP(target)} (+${gain}%)`,
+          `🤖 El bot avisa cuando el precio se acerque.`,
+        ].join("\n");
+        await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO, msg);
+        console.log(`🎯 Target registrado: ${sym} → ${fmtP(target)}`);
+      } else {
+        await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO,
+          `⚠️ No tienes posición abierta en ${parts[1]?.toUpperCase() || "?"}`);
+      }
+    }
+
   } else if (msgBody.toUpperCase() === "ESTADO") {
-    // Ver posiciones actuales
+    // Ver posiciones actuales con targets
     const lines = ["📊 *POSICIONES ACTUALES*", "━━━━━━━━━━━━━━━━━━━━"];
     for (const [sym, pos] of Object.entries(state.positions || {})) {
       if (pos.phase === "HOLDING" && pos.entryPrice) {
-        lines.push(`🟢 ${sym}: HOLDING ${fmtP(pos.entryPrice)} | Ciclos: ${pos.cycleCount}`);
+        const pnlLine = pos.targetPrice
+          ? `Target: ${fmtP(pos.targetPrice)}`
+          : `Sin target definido`;
+        lines.push(`🟢 ${sym}: ${fmtP(pos.entryPrice)} → ${pnlLine}`);
       } else {
-        lines.push(`⚪ ${sym}: esperando entrada | Ciclos: ${pos.cycleCount || 0}`);
+        lines.push(`⚪ ${sym}: esperando entrada`);
       }
     }
     lines.push(``, `💵 PnL mes: $${(state.monthlyPnl||0).toFixed(0)} / $4,000`);
@@ -242,8 +271,9 @@ async function handleWebhook(req, res) {
       ``,
       `*1* → Confirmar compra pendiente`,
       `*2* → Ignorar señal`,
-      `*ENTRADA BTC 67153* → Registrar compra manual`,
-      `*ESTADO* → Ver posiciones actuales`,
+      `*ENTRADA BTC 71319* → Registrar compra manual`,
+      `*VENTA BTC 90000* → Registrar target de venta`,
+      `*ESTADO* → Ver posiciones y targets`,
     ].join("\n");
     await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO, helpMsg);
   }
