@@ -221,6 +221,83 @@ async function handleWebhook(req, res) {
       }
     }
 
+  } else if (msgBody.toUpperCase().startsWith("SALIDA ")) {
+    // Comando: SALIDA BTC 89500 — cierra trade y registra en historial
+    const parts = msgBody.split(" ");
+    if (parts.length === 3) {
+      const sym      = parts[1].toUpperCase();
+      const exitPrice = parseFloat(parts[2]);
+      const pos      = state.positions?.[sym];
+
+      if (pos && pos.phase === "HOLDING" && pos.entryPrice && exitPrice > 0) {
+        const capital  = ASSET_CONFIG[sym]?.capital || 0;
+        const pnl      = (exitPrice - pos.entryPrice) * (capital / pos.entryPrice);
+        const pnlPct   = ((exitPrice - pos.entryPrice) / pos.entryPrice * 100);
+        const durH     = pos.entryTs ? +((Date.now() - pos.entryTs) / 3600000).toFixed(1) : 0;
+        const resultado = pnl >= 0 ? "GANANCIA" : "PERDIDA";
+
+        // Registrar trade en historial
+        const trade = {
+          sym, tipo: "SALIDA_MANUAL",
+          entryPrice: pos.entryPrice,
+          exitPrice,
+          pnl:        +pnl.toFixed(2),
+          pnlPct:     +pnlPct.toFixed(2),
+          capital,
+          fechaEntrada: pos.entryTs ? new Date(pos.entryTs).toISOString() : "?",
+          fechaSalida:  new Date().toISOString(),
+          duracionH:    durH,
+          resultado,
+          razonEntrada: pos.razonEntrada || "manual",
+          razonSalida:  durH <= 3 ? "salida por momentum/lateral" : "salida manual",
+          fg:           0,
+        };
+
+        if (!state.tradeLog)    state.tradeLog    = [];
+        if (!state.weeklyTrades) state.weeklyTrades = [];
+        state.tradeLog.push(trade);
+        state.weeklyTrades.push(trade);
+        if (state.tradeLog.length > 300) state.tradeLog = state.tradeLog.slice(-300);
+
+        // Actualizar PnL
+        state.monthlyPnl = (state.monthlyPnl || 0) + pnl;
+        state.weeklyPnl  = (state.weeklyPnl  || 0) + pnl;
+
+        // Cerrar posición
+        state.positions[sym] = {
+          ...pos,
+          phase:       "WAITING_BUY",
+          entryPrice:  0,
+          entryTs:     0,
+          targetPrice: 0,
+          razonEntrada: "",
+          lastPrice:   exitPrice,
+          profitAccum: (pos.profitAccum || 0) + pnl,
+        };
+
+        await saveGist(GIST_TOKEN, state);
+
+        const icon = pnl >= 0 ? "💰" : "📉";
+        const msg = [
+          `${icon} *TRADE CERRADO — ${sym}*`,
+          `━━━━━━━━━━━━━━━━━━━━`,
+          `📈 Entrada: ${fmtP(pos.entryPrice)}`,
+          `📉 Salida:  ${fmtP(exitPrice)}`,
+          `💵 PnL: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(0)} (${pnlPct.toFixed(1)}%)`,
+          `⏱️ Duración: ${durH}h`,
+          ``,
+          `📊 PnL mes: $${(state.monthlyPnl||0).toFixed(0)} / $4,000`,
+          `🤖 ${sym} vuelve a modo ESPERA — monitoreando próxima entrada.`,
+        ].join("\n");
+
+        await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO, msg);
+        console.log(`✅ Trade cerrado: ${sym} | PnL: $${pnl.toFixed(0)}`);
+      } else {
+        await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO,
+          `⚠️ No tienes posición HOLDING en ${sym}`);
+      }
+    }
+
   } else if (msgBody.toUpperCase().startsWith("VENTA ")) {
     // Comando: VENTA BTC 90000 — registra target de venta
     const parts = msgBody.split(" ");
@@ -272,6 +349,7 @@ async function handleWebhook(req, res) {
       `*1* → Confirmar compra pendiente`,
       `*2* → Ignorar señal`,
       `*ENTRADA BTC 71319* → Registrar compra manual`,
+      `*SALIDA BTC 89500* → Cerrar trade y registrar PnL`,
       `*VENTA BTC 90000* → Registrar target de venta`,
       `*ESTADO* → Ver posiciones y targets`,
     ].join("\n");
