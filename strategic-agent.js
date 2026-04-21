@@ -54,6 +54,7 @@ const ASSETS = {
     timeframe:     "horas–1 día",
     cooldownH:     0.5,
     stopMult:      1.8,
+    rrMin:         3,            // R:R mínimo 3:1
   },
   SOL: {
     cgId:          "solana",
@@ -64,6 +65,7 @@ const ASSETS = {
     timeframe:     "1–2 días",
     cooldownH:     0.75,
     stopMult:      1.7,
+    rrMin:         3,            // R:R mínimo 3:1
   },
   TAO: {
     cgId:          "bittensor",
@@ -74,16 +76,18 @@ const ASSETS = {
     timeframe:     "1–2 días",
     cooldownH:     0.75,
     stopMult:      1.7,
+    rrMin:         3,            // R:R mínimo 3:1
   },
   XAU: {
-    cgId:          null,
-    apiType:       "metals",
+    cgId:          "pax-gold",   // PAXG — token oro en CoinGecko
+    apiType:       "coingecko",  // usa CoinGecko, no metals API
     capital:       2500,
     swingPct:      0.04,
     activationPct: 0.02,
     timeframe:     "1–3 días",
     cooldownH:     1,
     stopMult:      1.6,
+    rrMin:         4,            // R:R mínimo 4:1 para oro (más selectivo)
   },
 };
 
@@ -102,10 +106,11 @@ const ASSET_KEYWORDS = {
   TAO: ["bittensor","tao","ai","artificial intelligence","inteligencia artificial",
         "opentensor","subnet","agi","openai","deepmind","grok","llm","gemini",
         "nvidia","gpu","machine learning","chatgpt","anthropic","depin"],
-  XAU: ["gold","oro","xauusd","xau","powell","fed rate","interest rate",
-        "tasa de interés","inflation","inflación","iran","guerra","war",
-        "dollar","dólar","nfp","treasury","geopolit","refugio","safe haven",
-        "central bank","banco central","brics","petrodollar","yield"],
+  XAU: ["gold","oro","xauusd","xau","paxg","pax gold","powell","fed rate",
+        "interest rate","tasa de interés","inflation","inflación","iran",
+        "guerra","war","dollar","dólar","nfp","treasury","geopolit",
+        "refugio","safe haven","central bank","banco central","brics",
+        "petrodollar","yield"],
 };
 
 // ─── FEEDS DE NOTICIAS ───────────────────────────────────────
@@ -121,7 +126,7 @@ const STATE_FILE   = "/tmp/bitcopper_v41_state.json";
 const GIST_ID      = "fcb66e3c3aa96220b17040fd72295fab";
 const GIST_FILE    = "state.json";
 const NEWS_CD_H    = 2;    // noticias: 2h entre alertas
-const HEARTBEAT_CD = 20;   // heartbeat diario
+const HEARTBEAT_CD = 12;   // heartbeat 2x por día (7AM y 7PM)
 
 // ─── HELPERS ─────────────────────────────────────────────────
 function get(url, raw = false, extraHeaders = {}) {
@@ -482,13 +487,14 @@ REGLAS APRENDIDAS DE HISTORIAL REAL (aplica estas por encima de las generales):
 
   // R:R dinamico
   const riskPct = asset.swingPct * asset.stopMult;
+  const rrMin   = asset.rrMin || 3;
   const rrStop  = price * (1 - riskPct);
-  const rrTgt3  = price * (1 + riskPct * 3);
-  const rrTgt4  = price * (1 + riskPct * 4);
+  const rrTgt   = price * (1 + riskPct * rrMin);
+  const rrTgtP1 = price * (1 + riskPct * (rrMin + 1));
 
   const prompt = `Eres el motor de decision de Bitcopper v4.1 para Pedro.
 Meta semanal: $1,000. Capital en ${sym}: $${asset.capital}.
-FILOSOFIA: Solo entrar con Riesgo:Recompensa minimo 3:1.
+FILOSOFIA: Solo entrar con Riesgo:Recompensa minimo ${rrMin}:1 ${sym === "XAU" ? "(oro requiere mayor confirmacion)" : "(cripto)"}.
 
 ACTIVO: ${sym} | Precio: ${fmtP(price)} | F&G: ${fg.value} (${fgSignal})
 Cambio reciente: ${changePctFromLast.toFixed(2)}% | BTC Dom: ${btcDom}%
@@ -500,15 +506,15 @@ ${newsStr}
 ${reglasStr}
 
 CALCULO R:R si entra ahora:
-Stop: ${fmtP(rrStop)} | Target 3:1: ${fmtP(rrTgt3)} | Target 4:1: ${fmtP(rrTgt4)}
+Stop: ${fmtP(rrStop)} | Target ${rrMin}:1: ${fmtP(rrTgt)} | Target ${rrMin+1}:1: ${fmtP(rrTgtP1)}
 
 REGLAS:
-- COMPRAR: soporte claro + target 3:1 alcanzable + F&G<70 + noticias no bajistas
+- COMPRAR: soporte claro + target ${rrMin}:1 alcanzable + F&G<70 + noticias no bajistas
 - VENDER: precio alcanzo target 3:1 o 4:1
 - PREPARAR_COMPRA: estructura bajista agotandose, soporte visible
 - PREPARAR_VENTA: precio cerca del target
 - STOP_DEFENSIVO: rompio soporte con fuerza
-- ESPERAR: sin R:R 3:1 claro. Calidad sobre cantidad.
+- ESPERAR: sin R:R ${rrMin}:1 claro. Calidad sobre cantidad.
 
 Responde SOLO JSON sin markdown:
 {
@@ -516,9 +522,9 @@ Responde SOLO JSON sin markdown:
   "confianza": "ALTA"|"MEDIA"|"BAJA",
   "razon": "max 2 lineas con R:R",
   "stopPrice": ${rrStop.toFixed(2)},
-  "targetPrice": ${rrTgt3.toFixed(2)},
-  "ratio": "3:1",
-  "gananciaEstimada": ${(asset.capital * riskPct * 3).toFixed(0)},
+  "targetPrice": ${rrTgt.toFixed(2)},
+  "ratio": "${rrMin}:1",
+  "gananciaEstimada": ${(asset.capital * riskPct * rrMin).toFixed(0)},
   "urgencia": "INMEDIATA"|"PROXIMA_HORA"|"HOY"
 }`;
 
@@ -882,7 +888,8 @@ async function main() {
     timeZone: "America/Santiago", hour: "numeric", hour12: false
   }));
 
-  if (hour === 7 && canAlert(state, "HEARTBEAT_DAILY", HEARTBEAT_CD)) {
+  const isHeartbeatHour = hour === 7 || hour === 19;
+  if (isHeartbeatHour && canAlert(state, "HEARTBEAT_DAILY", HEARTBEAT_CD)) {
     const progreso = Math.min(100, (state.monthlyPnl / 4000 * 100)).toFixed(0);
     const barLen   = Math.floor(progreso / 10);
     const bar      = "█".repeat(barLen) + "░".repeat(10 - barLen);
