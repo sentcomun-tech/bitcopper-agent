@@ -1243,3 +1243,4 @@ PARA MÁS/MENOS SENSIBILIDAD:
   Bajar swingPct y activationPct → más señales, ciclos más cortos
   Subir swingPct y activationPct → menos señales, ganancias mayores por ciclo
 */
+
