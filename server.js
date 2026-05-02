@@ -298,6 +298,102 @@ async function handleWebhook(req, res) {
       }
     }
 
+  } else if (msgBody.toUpperCase().startsWith("SHORT ")) {
+    // Comando: SHORT BTC 78420 — registrar short abierto manualmente
+    const parts = msgBody.split(" ");
+    if (parts.length === 3) {
+      const sym   = parts[1].toUpperCase();
+      const price = parseFloat(parts[2]);
+      const EXNESS_CFG = {
+        BTC: { capital:300, lote:0.01, swingPct:0.04, stopMult:1.8, rrMin:3, simbolo:"BTCUSD" },
+        ETH: { capital:300, lote:0.10, swingPct:0.05, stopMult:1.8, rrMin:3, simbolo:"ETHUSD" },
+        XAU: { capital:212, lote:0.10, swingPct:0.04, stopMult:1.6, rrMin:4, simbolo:"XAUUSD" },
+      };
+      const ex = EXNESS_CFG[sym];
+      if (ex && price > 0) {
+        if (!state.shortPositions) state.shortPositions = {};
+        state.shortPositions[sym] = {
+          phase:      "SHORT_OPEN",
+          entryPrice: price,
+          entryTs:    Date.now(),
+          razon:      "Entrada manual via WhatsApp",
+          lastPrice:  price,
+        };
+        const riskPct = ex.swingPct * ex.stopMult;
+        const stop    = price * (1 + riskPct);
+        const target  = price * (1 - riskPct * ex.rrMin);
+        await saveGist(GIST_TOKEN, state);
+        const msg = [
+          `🔴 *SHORT REGISTRADO — ${sym} EXNESS*`,
+          `━━━━━━━━━━━━━━━━━━━━`,
+          `💰 Entrada: ${fmtP(price)}`,
+          `📉 Stop loss: ${fmtP(stop)}`,
+          `🎯 Target ${ex.rrMin}:1: ${fmtP(target)}`,
+          `📦 Lote: ${ex.lote} ${ex.simbolo}`,
+          `💵 Capital: $${ex.capital}`,
+          `🤖 Bot monitorea y avisa cuando cubrir.`,
+        ].join("\n");
+        await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO, msg);
+        console.log(`🔴 Short registrado: ${sym} a ${fmtP(price)}`);
+      }
+    }
+
+  } else if (msgBody.toUpperCase().startsWith("CUBRIR ")) {
+    // Comando: CUBRIR BTC 74000 — cerrar short y registrar PnL
+    const parts = msgBody.split(" ");
+    if (parts.length === 3) {
+      const sym       = parts[1].toUpperCase();
+      const exitPrice = parseFloat(parts[2]);
+      const shortPos  = state.shortPositions?.[sym];
+      const EXNESS_CFG = {
+        BTC: { capital:300, lote:0.01, simbolo:"BTCUSD" },
+        ETH: { capital:300, lote:0.10, simbolo:"ETHUSD" },
+        XAU: { capital:212, lote:0.10, simbolo:"XAUUSD" },
+      };
+      const ex = EXNESS_CFG[sym];
+      if (ex && shortPos?.phase === "SHORT_OPEN" && exitPrice > 0) {
+        const pnl    = (shortPos.entryPrice - exitPrice) * ex.capital / shortPos.entryPrice;
+        const pnlPct = ((shortPos.entryPrice - exitPrice) / shortPos.entryPrice * 100);
+        const durH   = shortPos.entryTs ? +((Date.now()-shortPos.entryTs)/3600000).toFixed(1) : 0;
+
+        if (!state.tradeLog)    state.tradeLog    = [];
+        if (!state.weeklyTrades) state.weeklyTrades = [];
+        const trade = {
+          sym, tipo:"SHORT_EXNESS",
+          entryPrice:shortPos.entryPrice, exitPrice,
+          pnl:+pnl.toFixed(2), pnlPct:+pnlPct.toFixed(2),
+          capital:ex.capital, lote:ex.lote,
+          fechaEntrada:shortPos.entryTs?new Date(shortPos.entryTs).toISOString():"?",
+          fechaSalida:new Date().toISOString(),
+          duracionH:durH, resultado:pnl>=0?"GANANCIA":"PERDIDA",
+          razonEntrada:shortPos.razon||"manual", razonSalida:"cierre manual", fg:0,
+        };
+        state.tradeLog.push(trade);
+        state.weeklyTrades.push(trade);
+        state.monthlyPnl = (state.monthlyPnl||0) + pnl;
+        state.weeklyPnl  = (state.weeklyPnl||0)  + pnl;
+        state.shortPositions[sym] = { phase:"SHORT_WAITING", entryPrice:0, lastPrice:exitPrice };
+
+        await saveGist(GIST_TOKEN, state);
+        const icon = pnl >= 0 ? "💰" : "📉";
+        const msg = [
+          `${icon} *SHORT CERRADO — ${sym} EXNESS*`,
+          `━━━━━━━━━━━━━━━━━━━━`,
+          `📉 Entrada: ${fmtP(shortPos.entryPrice)}`,
+          `📈 Cierre:  ${fmtP(exitPrice)}`,
+          `💵 PnL: ${pnl>=0?"+":""}$${pnl.toFixed(0)} (${pnlPct.toFixed(1)}%)`,
+          `⏱️ Duración: ${durH}h`,
+          ``,
+          `📊 PnL mes: $${(state.monthlyPnl||0).toFixed(0)} / $4,000`,
+        ].join("\n");
+        await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO, msg);
+        console.log(`💚 Short cerrado: ${sym} | PnL: $${pnl.toFixed(0)}`);
+      } else {
+        await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO,
+          `⚠️ No tienes short abierto en ${sym}`);
+      }
+    }
+
   } else if (msgBody.toUpperCase().startsWith("VENTA ")) {
     // Comando: VENTA BTC 90000 — registra target de venta
     const parts = msgBody.split(" ");
@@ -349,8 +445,10 @@ async function handleWebhook(req, res) {
       `*1* → Confirmar compra pendiente`,
       `*2* → Ignorar señal`,
       `*ENTRADA BTC 71319* → Registrar compra manual`,
-      `*SALIDA BTC 89500* → Cerrar trade y registrar PnL`,
+      `*SALIDA BTC 89500* → Cerrar long y registrar PnL`,
       `*VENTA BTC 90000* → Registrar target de venta`,
+      `*SHORT BTC 78420* → Registrar short en Exness`,
+      `*CUBRIR BTC 74000* → Cerrar short Exness + PnL`,
       `*ESTADO* → Ver posiciones y targets`,
     ].join("\n");
     await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO, helpMsg);
