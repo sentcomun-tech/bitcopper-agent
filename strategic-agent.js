@@ -91,6 +91,15 @@ const ASSETS = {
   },
 };
 
+
+// ─── SHORTS EXNESS ──────────────────────────────────────────
+// Capital total Exness: $812 | Señales informativas — Pedro abre en Exness
+const EXNESS = {
+  BTC: { capital: 300, lote: 0.01, swingPct: 0.04, stopMult: 1.8, rrMin: 3, simbolo: "BTCUSD" },
+  ETH: { capital: 300, lote: 0.10, swingPct: 0.05, stopMult: 1.8, rrMin: 3, simbolo: "ETHUSD" },
+  XAU: { capital: 212, lote: 0.10, swingPct: 0.04, stopMult: 1.6, rrMin: 4, simbolo: "XAUUSD" },
+};
+
 // ─── KEYWORDS DE NOTICIAS ────────────────────────────────────
 // Ampliados para máxima cobertura de eventos que mueven precio
 const ASSET_KEYWORDS = {
@@ -550,6 +559,38 @@ Responde SOLO JSON sin markdown:
   }
 }
 
+
+// ─── MOTOR SHORTS EXNESS ─────────────────────────────────────
+async function claudeShort(sym, price, ex, fg, btcDom, news, state) {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return null;
+  const newsStr = news.length > 0
+    ? news.slice(0,4).map((n,i)=>`[${i+1}] ${n.source}: "${n.title}"`).join("\n")
+    : "Sin noticias relevantes.";
+  const fgSignal = fg.value > 75 ? "EUFORIA → SHORT fuerte"
+    : fg.value > 60 ? "CODICIA → sesgo SHORT"
+    : fg.value < 25 ? "PANICO → evitar shorts"
+    : "NEUTRAL";
+  const riskPct = ex.swingPct * ex.stopMult;
+  const stopSh  = price * (1 + riskPct);
+  const tgt     = price * (1 - riskPct * ex.rrMin);
+  const shortPos = state.shortPositions?.[sym];
+  const prompt = `Motor de shorts Bitcopper para Pedro. Capital Exness ${sym}: $${ex.capital} | Lote: ${ex.lote}
+Solo shortear con R:R minimo ${ex.rrMin}:1. Complementa los longs de Binance.
+Precio: $${price} | F&G: ${fg.value} (${fgSignal}) | BTC Dom: ${btcDom}%
+${shortPos?.phase === "SHORT_OPEN" ? `SHORT ABIERTO desde $${shortPos.entryPrice}` : "Sin short abierto"}
+NOTICIAS: ${newsStr}
+R:R SHORT: Stop $${stopSh.toFixed(0)} | Target ${ex.rrMin}:1 = $${tgt.toFixed(0)}
+REGLAS: SHORT si resistencia clara + F&G>55 + R:R${ex.rrMin}:1. CUBRIR si llego target o F&G<35. ESPERAR si F&G<20.
+Responde SOLO JSON: {"decision":"ABRIR_SHORT"|"CUBRIR_SHORT"|"PREPARAR_SHORT"|"ESPERAR","confianza":"ALTA"|"MEDIA"|"BAJA","razon":"max 2 lineas","stopPrice":${stopSh.toFixed(2)},"targetPrice":${tgt.toFixed(2)},"ratio":"${ex.rrMin}:1","lote":${ex.lote},"gananciaEstimada":${(ex.capital*riskPct*ex.rrMin).toFixed(0)},"urgencia":"INMEDIATA"|"PROXIMA_HORA"|"HOY"}`;
+  try {
+    const r = await post("https://api.anthropic.com/v1/messages",
+      { model:"claude-sonnet-4-20250514", max_tokens:250, messages:[{role:"user",content:prompt}] },
+      {"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"});
+    return JSON.parse((r.body?.content?.[0]?.text??"{}").replace(/```json|```/g,"").trim());
+  } catch(e) { console.log(`  ⚠️ Short error (${sym}):`,e.message?.slice(0,40)); return null; }
+}
+
 // ─── CLAUDE NOTICIAS ─────────────────────────────────────────
 async function claudeNewsAlert(news, prices, state) {
   const key = process.env.ANTHROPIC_API_KEY;
@@ -846,6 +887,71 @@ async function main() {
       }
     } else {
       state.positions[sym].lastPrice = price;
+    }
+  }
+
+
+  // ── SHORTS EXNESS ────────────────────────────────────────
+  if (!state.shortPositions) state.shortPositions = {};
+  for (const [sym, ex] of Object.entries(EXNESS)) {
+    const pd = prices[sym] || prices["XAU"];
+    if (!pd?.price) continue;
+    const price    = pd.price;
+    const shortPos = state.shortPositions[sym] || { phase:"SHORT_WAITING", entryPrice:0, lastPrice:0 };
+    const relNews  = newNews.filter(n => getAffectedAssets(n.title,n.desc).includes(sym));
+    const cdOk     = canAlert(state, `${sym}_SHORT`, 0.75);
+    const movPct   = shortPos.lastPrice ? Math.abs(pctChange(shortPos.lastPrice, price)) : 100;
+    const inShort  = shortPos.phase === "SHORT_OPEN";
+    const stopHit  = inShort && pctChange(shortPos.entryPrice, price) >= ex.swingPct * ex.stopMult * 100;
+
+    if ((movPct >= ex.swingPct*60 || relNews.length > 0 || stopHit) && cdOk) {
+      const result = await claudeShort(sym, price, ex, fg, btcDom, relNews, state);
+      if (result && result.decision !== "ESPERAR") {
+        const icons = { ABRIR_SHORT:"🔴", CUBRIR_SHORT:"💚", PREPARAR_SHORT:"⚡" };
+        const urgStr = result.urgencia==="INMEDIATA"?"⏰ INMEDIATA":result.urgencia==="PROXIMA_HORA"?"🕐 Próx hora":"📅 Hoy";
+        const lines = [
+          `${icons[result.decision]||"🔵"} *${result.decision.replace(/_/g," ")} — ${sym} EXNESS*`,
+          `━━━━━━━━━━━━━━━━━━━━`,
+          `💰 Precio: ${fmtP(price)} | ${urgStr} | Confianza: ${result.confianza}`,
+        ];
+        if (result.decision === "ABRIR_SHORT") {
+          lines.push(`📉 Stop: ${fmtP(result.stopPrice)} | Target ${result.ratio}: ${fmtP(result.targetPrice)}`);
+          lines.push(`📦 Lote: ${result.lote} ${ex.simbolo} en Exness MT5`);
+          lines.push(`💵 Capital: $${ex.capital} | Ganancia est: ~$${result.gananciaEstimada}`);
+          lines.push(``, `Responde *1* para confirmar / *2* para ignorar`);
+          state.pendingShort = { sym, price, razon:result.razon, stopPrice:result.stopPrice, targetPrice:result.targetPrice, ratio:result.ratio, lote:result.lote, ts:Date.now() };
+          saveState(state);
+          await saveStateToGist(state);
+        }
+        if (result.decision === "CUBRIR_SHORT" && inShort) {
+          const pnl = (shortPos.entryPrice - price) * ex.capital / shortPos.entryPrice;
+          lines.push(`📈 Entrada: ${fmtP(shortPos.entryPrice)} | PnL: ${pnl>=0?"+":""}$${pnl.toFixed(0)}`);
+          lines.push(`👉 Cubrir en Exness MT5 → ${ex.simbolo}`);
+        }
+        if (result.decision === "PREPARAR_SHORT") {
+          lines.push(`📉 Precio cerca de resistencia — prepara short en Exness`);
+        }
+        lines.push(``, `🧠 ${result.razon}`);
+        const ok = await sendWA(lines);
+        if (ok) {
+          state.alerts[`${sym}_SHORT`] = Date.now();
+          sent++;
+          if (result.decision === "CUBRIR_SHORT" && inShort) {
+            const pnl = (shortPos.entryPrice - price) * ex.capital / shortPos.entryPrice;
+            state.monthlyPnl += pnl; state.weeklyPnl += pnl;
+            const trade = { sym, tipo:"SHORT_EXNESS", entryPrice:shortPos.entryPrice, exitPrice:price,
+              pnl:+pnl.toFixed(2), pnlPct:+((shortPos.entryPrice-price)/shortPos.entryPrice*100).toFixed(2),
+              capital:ex.capital, lote:ex.lote,
+              fechaEntrada:shortPos.entryTs?new Date(shortPos.entryTs).toISOString():"?",
+              fechaSalida:new Date().toISOString(),
+              duracionH:shortPos.entryTs?+((Date.now()-shortPos.entryTs)/3600000).toFixed(1):0,
+              resultado:pnl>=0?"GANANCIA":"PERDIDA", razonEntrada:shortPos.razon||"?", razonSalida:result.razon, fg:fg.value };
+            state.tradeLog.push(trade); state.weeklyTrades.push(trade);
+            state.shortPositions[sym] = { phase:"SHORT_WAITING", entryPrice:0, lastPrice:price };
+          }
+        }
+      }
+      state.shortPositions[sym] = { ...shortPos, lastPrice:price };
     }
   }
 
