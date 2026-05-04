@@ -131,9 +131,49 @@ async function handleWebhook(req, res) {
     XAU: { capital: 2500, swingPct: 0.04, stopMult: 1.6 },
   };
 
-  const pending = state.pendingConfirmation;
+  const pending      = state.pendingConfirmation;
+  const pendingShort = state.pendingShort;
 
-  if (msgBody === "1" && pending) {
+  if (msgBody === "1" && pendingShort && !pending) {
+    // ✅ CONFIRMÓ SHORT
+    const { sym, price, razon, stopPrice, targetPrice, ratio, lote } = pendingShort;
+    const EXNESS_SHORT = {
+      BTC: { capital:300, lote:0.01, simbolo:"BTCUSD" },
+      ETH: { capital:300, lote:0.10, simbolo:"ETHUSD" },
+      XAU: { capital:212, lote:0.10, simbolo:"XAUUSD" },
+    };
+    const ex = EXNESS_SHORT[sym];
+    if (ex) {
+      if (!state.shortPositions) state.shortPositions = {};
+      state.shortPositions[sym] = {
+        phase:      "SHORT_OPEN",
+        entryPrice: price,
+        entryTs:    Date.now(),
+        razon:      razon || "Confirmado via WhatsApp",
+        lastPrice:  price,
+      };
+      state.pendingShort = null;
+      await saveGist(GIST_TOKEN, state);
+      const msg = [
+        `🔴 *SHORT CONFIRMADO — ${sym} EXNESS*`,
+        `━━━━━━━━━━━━━━━━━━━━`,
+        `💰 Entrada: ${fmtP(price)}`,
+        `📉 Stop: ${fmtP(stopPrice)} | Target ${ratio}: ${fmtP(targetPrice)}`,
+        `📦 Lote: ${lote} ${ex.simbolo} en Exness MT5`,
+        `🤖 Bot monitorea y avisa cuando cubrir.`,
+      ].join("\n");
+      await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO, msg);
+      console.log(`🔴 Short confirmado: ${sym} a ${fmtP(price)}`);
+    }
+
+  } else if (msgBody === "2" && pendingShort && !pending) {
+    // ❌ IGNORÓ SHORT
+    state.pendingShort = null;
+    await saveGist(GIST_TOKEN, state);
+    await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO,
+      `⏭️ Short ${pendingShort.sym} ignorado. El bot sigue monitoreando.`);
+
+  } else if (msgBody === "1" && pending) {
     // ✅ CONFIRMÓ COMPRA
     const { sym, price, razon } = pending;
     const asset = ASSET_CONFIG[sym];
@@ -292,6 +332,78 @@ async function handleWebhook(req, res) {
 
         await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO, msg);
         console.log(`✅ Trade cerrado: ${sym} | PnL: $${pnl.toFixed(0)}`);
+
+        // ── EVALUAR SHORT EN EXNESS DESPUÉS DE CERRAR LONG ──────
+        // Solo para activos que tienen short disponible en Exness
+        const EXNESS_SHORT = {
+          BTC: { capital:300, lote:0.01, swingPct:0.04, stopMult:1.8, rrMin:3, simbolo:"BTCUSD" },
+          ETH: { capital:300, lote:0.10, swingPct:0.05, stopMult:1.8, rrMin:3, simbolo:"ETHUSD" },
+          XAU: { capital:212, lote:0.10, swingPct:0.04, stopMult:1.6, rrMin:4, simbolo:"XAUUSD" },
+        };
+        const ex = EXNESS_SHORT[sym];
+        const shortYaAbierto = state.shortPositions?.[sym]?.phase === "SHORT_OPEN";
+
+        if (ex && !shortYaAbierto) {
+          // Llamar Claude para evaluar si conviene abrir short ahora
+          const anthropicKey = process.env.ANTHROPIC_API_KEY;
+          if (anthropicKey) {
+            try {
+              const riskPct = ex.swingPct * ex.stopMult;
+              const stopSh  = exitPrice * (1 + riskPct);
+              const tgt     = exitPrice * (1 - riskPct * ex.rrMin);
+              const prompt  = `Pedro acaba de cerrar un LONG de ${sym} a $${exitPrice} con PnL $${pnl.toFixed(0)}.
+Evalua si conviene abrir SHORT en Exness ahora mismo.
+Activo: ${sym} | Precio actual: $${exitPrice}
+Capital Exness: $${ex.capital} | Lote: ${ex.lote} | R:R min: ${ex.rrMin}:1
+Stop short: $${stopSh.toFixed(0)} | Target: $${tgt.toFixed(0)}
+PnL mes actual: $${(state.monthlyPnl||0).toFixed(0)} / $4,000
+
+Considera: ¿el precio acaba de llegar a resistencia? ¿hay momentum bajista? ¿conviene abrir short?
+Responde SOLO JSON: {"abrirShort":true|false,"confianza":"ALTA"|"MEDIA"|"BAJA","razon":"max 1 linea"}`;
+
+              const r = await httpRequest(
+                "https://api.anthropic.com/v1/messages",
+                "POST",
+                { model:"claude-sonnet-4-20250514", max_tokens:150, messages:[{role:"user",content:prompt}] },
+                { "Content-Type":"application/json", "x-api-key":anthropicKey, "anthropic-version":"2023-06-01" }
+              );
+              const raw   = r.body?.content?.[0]?.text ?? "{}";
+              const eval_ = JSON.parse(raw.replace(/```json|```/g,"").trim());
+
+              if (eval_?.abrirShort) {
+                // Guardar pending short y preguntar a Pedro
+                state.pendingShort = {
+                  sym, price:exitPrice,
+                  razon:      eval_.razon,
+                  stopPrice:  stopSh,
+                  targetPrice:tgt,
+                  ratio:      `${ex.rrMin}:1`,
+                  lote:       ex.lote,
+                  ts:         Date.now(),
+                };
+                await saveGist(GIST_TOKEN, state);
+
+                const shortMsg = [
+                  `⚡ *OPORTUNIDAD SHORT — ${sym} EXNESS*`,
+                  `━━━━━━━━━━━━━━━━━━━━`,
+                  `💰 Precio: ${fmtP(exitPrice)} | Confianza: ${eval_.confianza}`,
+                  `📉 Stop: ${fmtP(stopSh)} | Target ${ex.rrMin}:1: ${fmtP(tgt)}`,
+                  `📦 Lote: ${ex.lote} ${ex.simbolo} en Exness MT5`,
+                  `💵 Capital: $${ex.capital}`,
+                  ``,
+                  `🧠 ${eval_.razon}`,
+                  ``,
+                  `Responde *1* para abrir short / *2* para ignorar`,
+                ].join("\n");
+                await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO, shortMsg);
+                console.log(`⚡ Short sugerido para ${sym} después de cerrar long`);
+              }
+            } catch(e) {
+              console.log("  ⚠️ Eval short error:", e.message?.slice(0,50));
+            }
+          }
+        }
+
       } else {
         await sendWA(TWILIO_SID, TWILIO_AUTH, TWILIO_FROM, TWILIO_TO,
           `⚠️ No tienes posición HOLDING en ${sym}`);
@@ -476,3 +588,4 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`🚀 Bitcopper Webhook corriendo en puerto ${PORT}`);
 });
+
