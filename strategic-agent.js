@@ -451,7 +451,8 @@ Responde SOLO JSON sin markdown:
       { "Content-Type": "application/json", "x-api-key": key,
         "anthropic-version": "2023-06-01" }
     );
-    const raw = r.body?.content?.[0]?.text ?? "{}";
+    const raw = r.body?.content?.[0]?.text;
+    if (!raw) return null;
     return JSON.parse(raw.replace(/```json|```/g,"").trim());
   } catch(e) {
     console.log("  ⚠️ Learning rules error:", e.message?.slice(0,50));
@@ -551,7 +552,8 @@ Responde SOLO JSON sin markdown:
         "anthropic-version": "2023-06-01"
       }
     );
-    const raw = r.body?.content?.[0]?.text ?? "{}";
+    const raw = r.body?.content?.[0]?.text;
+    if (!raw) return null;
     return JSON.parse(raw.replace(/```json|```/g, "").trim());
   } catch(e) {
     console.log(`  ⚠️ Claude error (${sym}): ${e.message?.slice(0, 50)}`);
@@ -587,7 +589,9 @@ Responde SOLO JSON: {"decision":"ABRIR_SHORT"|"CUBRIR_SHORT"|"PREPARAR_SHORT"|"E
     const r = await post("https://api.anthropic.com/v1/messages",
       { model:"claude-sonnet-4-20250514", max_tokens:250, messages:[{role:"user",content:prompt}] },
       {"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"});
-    return JSON.parse((r.body?.content?.[0]?.text??"{}").replace(/```json|```/g,"").trim());
+    const raw = r.body?.content?.[0]?.text;
+    if (!raw) return null;
+    return JSON.parse(raw.replace(/```json|```/g,"").trim());
   } catch(e) { console.log(`  ⚠️ Short error (${sym}):`,e.message?.slice(0,40)); return null; }
 }
 
@@ -621,7 +625,8 @@ Portafolio:\n${portfolio}\n\nNOTICIAS:\n${newsStr}\n\nEvalúa impacto en BTC/ETH
         "anthropic-version": "2023-06-01"
       }
     );
-    const raw = r.body?.content?.[0]?.text ?? "{}";
+    const raw = r.body?.content?.[0]?.text;
+    if (!raw) return null;
     return JSON.parse(raw.replace(/```json|```/g, "").trim());
   } catch { return null; }
 }
