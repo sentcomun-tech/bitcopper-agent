@@ -203,7 +203,9 @@ function loadState() {
       tradeLog:       [],
       weeklyTrades:   [],
       learningNotes:  [],
-      learningRules:  null,   // reglas activas generadas por aprendizaje
+      learningRules:  null,
+      macroTrend:     { direction:"neutral", daysDown:0, daysUp:0, lastCheck:0 },
+      capitulationAlert: 0,
       lastWeekReset:  Date.now(),
       lastMonthReset: Date.now(),
     };
@@ -327,6 +329,85 @@ async function fetchBtcDom() {
     const d = await get("https://api.coingecko.com/api/v3/global");
     return +(d.data?.market_cap_percentage?.btc?.toFixed(1) ?? 50);
   } catch { return 50; }
+}
+
+
+// ─── TENDENCIA MACRO ─────────────────────────────────────────
+// Rastrea si el mercado lleva días bajando/subiendo
+// Bloquea compras si lleva 3+ días bajando
+function updateMacroTrend(state, prices) {
+  const btcPrice = prices?.BTC?.price || 0;
+  if (!btcPrice) return state.macroTrend;
+
+  const now      = Date.now();
+  const oneDay   = 24 * 3600 * 1000;
+  const trend    = state.macroTrend || { direction:"neutral", daysDown:0, daysUp:0, lastCheck:0, lastPrice:0 };
+
+  // Solo actualizar una vez por día
+  if (now - trend.lastCheck < oneDay) return trend;
+
+  const lastPrice = trend.lastPrice || btcPrice;
+  const change    = ((btcPrice - lastPrice) / lastPrice) * 100;
+
+  if (change <= -1.5) {
+    trend.daysDown  = (trend.daysDown || 0) + 1;
+    trend.daysUp    = 0;
+    trend.direction = trend.daysDown >= 3 ? "bajista_fuerte" : "bajista";
+  } else if (change >= 1.5) {
+    trend.daysUp    = (trend.daysUp || 0) + 1;
+    trend.daysDown  = 0;
+    trend.direction = trend.daysUp >= 2 ? "alcista" : "neutral";
+  } else {
+    trend.direction = "neutral";
+  }
+
+  trend.lastPrice = btcPrice;
+  trend.lastCheck = now;
+  console.log(`  📊 Macro: ${trend.direction} | Días baj: ${trend.daysDown} | Días alc: ${trend.daysUp}`);
+  return trend;
+}
+
+// ─── FILTROS DE SEGURIDAD ─────────────────────────────────────
+function canOpenLong(state, sym, fg) {
+  const trend = state.macroTrend || {};
+
+  // 1. Máximo 2 posiciones simultáneas
+  const openPositions = Object.values(state.positions || {})
+    .filter(p => p.phase === "HOLDING").length;
+  if (openPositions >= 2) {
+    console.log(`  🚫 ${sym}: max 2 posiciones simultáneas (${openPositions} abiertas)`);
+    return { ok: false, razon: "max_posiciones" };
+  }
+
+  // 2. No entrar si ya tienes posición en ese activo
+  if (state.positions?.[sym]?.phase === "HOLDING") {
+    console.log(`  🚫 ${sym}: ya tienes posición abierta`);
+    return { ok: false, razon: "posicion_existente" };
+  }
+
+  // 3. Bloquear compras en tendencia bajista fuerte (3+ días)
+  if (trend.direction === "bajista_fuerte" && fg.value > 25) {
+    console.log(`  🚫 ${sym}: tendencia bajista fuerte (${trend.daysDown} días) — bloqueando long`);
+    return { ok: false, razon: "tendencia_bajista" };
+  }
+
+  // 4. En tendencia bajista reducir capital al 50%
+  if (trend.direction === "bajista") {
+    return { ok: true, capitalMult: 0.5, razon: "tendencia_bajista_reducida" };
+  }
+
+  return { ok: true, capitalMult: 1.0, razon: "ok" };
+}
+
+// ─── SEÑAL DE CAPITULACIÓN ────────────────────────────────────
+// RSI < 15 + F&G < 20 = fondo probable — señal compra fuerte
+function isCapitulation(fg, prices) {
+  // F&G extremo
+  if (fg.value > 20) return false;
+  // Caída fuerte en 24h en BTC
+  const btcChange = prices?.BTC?.change24h || 0;
+  const ethChange = prices?.ETH?.change24h || 0;
+  return btcChange <= -5 || ethChange <= -8;
 }
 
 // ─── NOTICIAS ────────────────────────────────────────────────
@@ -797,7 +878,18 @@ async function main() {
     const cooldownOk  = canAlert(state, `${sym}_DECIDE`, asset.cooldownH);
 
     if ((hasMovement || hasNews || isStopZone) && cooldownOk) {
-      const result = await claudeDecide(sym, price, pos, fg, btcDom, relevantNews, asset, state);
+      // Aplicar filtros de seguridad antes de evaluar entrada
+      const filtro = canOpenLong(state, sym, fg);
+      // Si está en HOLDING evaluar igualmente (para VENDER/STOP)
+      const esHolding = pos.phase === "HOLDING";
+      if (!filtro.ok && !esHolding && !isStopZone) {
+        console.log(`  ⛔ ${sym} bloqueado: ${filtro.razon}`);
+        state.positions[sym].lastPrice = price;
+        continue;
+      }
+      // Ajustar capital si tendencia bajista
+      const assetAjustado = { ...asset, capital: Math.round(asset.capital * (filtro.capitalMult || 1.0)) };
+      const result = await claudeDecide(sym, price, pos, fg, btcDom, relevantNews, assetAjustado, state);
 
       if (result && result.decision !== "ESPERAR") {
         // Si es COMPRAR: guardar pendingConfirmation en Gist ANTES de enviar WhatsApp
@@ -818,7 +910,7 @@ async function main() {
           console.log(`  💾 Pending guardado en Gist: ${sym} a ${fmtP(price)}`);
         }
 
-        const msgLines = buildMessage(sym, result, price, asset, pos);
+        const msgLines = buildMessage(sym, result, price, assetAjustado, pos);
         const ok = await sendWA(msgLines);
 
         if (ok) {
@@ -1248,4 +1340,3 @@ PARA MÁS/MENOS SENSIBILIDAD:
   Bajar swingPct y activationPct → más señales, ciclos más cortos
   Subir swingPct y activationPct → menos señales, ganancias mayores por ciclo
 */
-
