@@ -1143,9 +1143,9 @@ async function main() {
     const wtSorted  = [...wt].sort((a,b) => b.pnl - a.pnl);
     const bestTrade = wtSorted[0];
     const worstTrade= wtSorted[wtSorted.length - 1];
-    const metaSem   = Math.min(100, (state.weeklyPnl / 1000 * 100)).toFixed(0);
-    const barLen    = Math.floor(Number(metaSem) / 10);
-    const bar       = "█".repeat(barLen) + "░".repeat(10 - barLen);
+    const metaSem   = Math.min(100, Math.max(0, (state.weeklyPnl / 1000 * 100))).toFixed(0);
+    const barLen    = Math.max(0, Math.floor(Number(metaSem) / 10));
+    const bar       = "█".repeat(barLen) + "░".repeat(Math.max(0, 10 - barLen));
 
     // Llamar a Claude para análisis de aprendizaje
     let aprendizaje = null;
