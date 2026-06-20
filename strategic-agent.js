@@ -1093,9 +1093,9 @@ async function main() {
 
   const isHeartbeatHour = hour === 7 || hour === 19;
   if (isHeartbeatHour && canAlert(state, "HEARTBEAT_DAILY", HEARTBEAT_CD)) {
-    const progreso = Math.min(100, (state.monthlyPnl / 4000 * 100)).toFixed(0);
-    const barLen   = Math.floor(progreso / 10);
-    const bar      = "█".repeat(barLen) + "░".repeat(10 - barLen);
+  const progreso = Math.min(100, Math.max(0, (state.monthlyPnl / 4000 * 100))).toFixed(0);
+  const barLen   = Math.max(0, Math.floor(Number(progreso) / 10));
+  const bar      = "█".repeat(barLen) + "░".repeat(Math.max(0, 10 - barLen));
 
     const lines = [
       `🤖 *Bitcopper v4.1 MAX — Activo*`,
