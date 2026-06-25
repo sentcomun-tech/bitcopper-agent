@@ -2,8 +2,8 @@ name: Bitcopper Strategic Agent v4.1 MAX
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # Cada 5 minutos, 24/7 (máximo GitHub Actions)
-  workflow_dispatch:          # Trigger manual para probar
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 jobs:
   run-agent:
@@ -17,15 +17,6 @@ jobs:
         with:
           node-version: "24"
 
-      # Estado local backup — Gist es la fuente principal
-      - name: Restore agent state
-        uses: actions/cache@v4
-        with:
-          path: /tmp/bitcopper_v41_state.json
-          key: bitcopper-v41-state-${{ github.run_id }}
-          restore-keys: |
-            bitcopper-v41-state-
-
       - name: Run strategic agent
         env:
           ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
@@ -35,11 +26,3 @@ jobs:
           TWILIO_WHATSAPP_TO:   ${{ secrets.TWILIO_WHATSAPP_TO }}
           GIST_TOKEN:           ${{ secrets.GIST_TOKEN }}
         run: node strategic-agent.js
-
-      # Guardar estado local siempre, incluso si el agente falla
-      - name: Save agent state
-        uses: actions/cache@v4
-        if: always()
-        with:
-          path: /tmp/bitcopper_v41_state.json
-          key: bitcopper-v41-state-${{ github.run_id }}
