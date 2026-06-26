@@ -407,10 +407,10 @@ async function fetchETFFlows(state) {
   }
 
   const headers = { "CG-API-KEY": key, "Accept": "application/json", "User-Agent": "BitcopperAgent/4.2" };
-  // Paths candidatos (la doc V4 muestra ambos formatos); probamos en orden.
+  // Endpoint verificado (25-jun-2026). El segundo queda como fallback defensivo.
   const endpoints = [
-    "https://open-api-v4.coinglass.com/api/etf/bitcoin/flow-history",
-    "https://open-api-v4.coinglass.com/api/bitcoin/etf/flow-history",
+    "https://open-api-v4.coinglass.com/api/etf/bitcoin/flow-history?limit=30",
+    "https://open-api-v4.coinglass.com/api/bitcoin/etf/flow-history?limit=30",
   ];
 
   async function pull(url) {
@@ -436,27 +436,41 @@ async function fetchETFFlows(state) {
     return null;
   }
 
-  // Extrae el flujo neto de cada registro de forma robusta.
-  // Campos posibles: flowUsd, changeUsd, netFlow, total_net_inflow...
+  // Extrae el flujo neto diario. Formato real CoinGlass V4: campo "flow_usd"
+  // (USD crudos). Se mantienen alias defensivos por si cambian el schema.
   function netOf(row) {
-    const cand = ["flowUsd","changeUsd","netFlow","totalNetInflow","total_net_inflow","netInflow","value"];
+    const cand = ["flow_usd","flowUsd","changeUsd","netFlow","total_net_inflow","netInflow","value"];
     for (const k of cand) {
       if (typeof row?.[k] === "number") return row[k];
       if (typeof row?.[k] === "string" && !isNaN(+row[k])) return +row[k];
     }
     return null;
   }
-  // Normaliza a millones USD (la API suele dar USD absolutos).
+  // CoinGlass entrega USD crudos → convertir a millones.
   function toMillions(v) {
     if (v === null) return null;
-    return Math.abs(v) > 1e6 ? v / 1e6 : v;  // si viene en USD crudos → a millones
+    return v / 1e6;
   }
 
-  // Ordena por fecha desc si hay timestamp; toma los últimos 7.
+  // Ordena por fecha DESC (más reciente primero).
   const tsKey = ["timestamp","time","date","t"].find(k => btcArr[0]?.[k] !== undefined);
-  if (tsKey) btcArr = [...btcArr].sort((a,b) => (b[tsKey] > a[tsKey] ? 1 : -1));
+  if (tsKey) btcArr = [...btcArr].sort((a,b) => (b[tsKey] - a[tsKey]));
 
-  const last7 = btcArr.slice(0, 7).map(netOf).filter(v => v !== null).map(toMillions);
+  // El registro más reciente puede venir con flow_usd:0 (día sin cierre aún).
+  // Se descartan los registros sin flujo real (null o exactamente 0 con etf_flows vacíos).
+  function esDiaValido(row) {
+    const v = netOf(row);
+    if (v === null) return false;
+    // Día sin datos: flow_usd 0 y todos los etf_flows sin flow_usd
+    if (v === 0 && Array.isArray(row?.etf_flows)) {
+      const algunFlujo = row.etf_flows.some(e => typeof e?.flow_usd === "number" && e.flow_usd !== 0);
+      if (!algunFlujo) return false;
+    }
+    return true;
+  }
+
+  const validos = btcArr.filter(esDiaValido);
+  const last7 = validos.slice(0, 7).map(netOf).map(toMillions);
   const lastDaily = last7.length ? last7[0] : null;
   const flow7dAvg = last7.length ? last7.reduce((s,v)=>s+v,0) / last7.length : null;
 
