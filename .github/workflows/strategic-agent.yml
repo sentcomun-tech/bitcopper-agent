@@ -1,31 +1,24 @@
-name: Bitcopper Strategic Agent v4.1 MAX
-
+name: Bitcopper Strategic Agent v4.2 MAX
 on:
   schedule:
     - cron: "*/5 * * * *"   # Cada 5 minutos, 24/7 (máximo GitHub Actions)
   workflow_dispatch:          # Trigger manual para probar
-
 # Evita que dos corridas solapadas toquen el mismo estado del Gist
 concurrency:
   group: bitcopper-agent
   cancel-in-progress: false
-
 jobs:
   run-agent:
     runs-on: ubuntu-latest
     timeout-minutes: 4
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-
       # Sin cache: el Gist es la fuente de verdad del estado.
       # El cache anterior (key con github.run_id) causaba colisiones
       # "Cache already exists" que tumbaban el job (fallo run #859).
-
       - name: Run strategic agent
         env:
           ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
@@ -34,4 +27,5 @@ jobs:
           TWILIO_WHATSAPP_FROM: ${{ secrets.TWILIO_WHATSAPP_FROM }}
           TWILIO_WHATSAPP_TO:   ${{ secrets.TWILIO_WHATSAPP_TO }}
           GIST_TOKEN:           ${{ secrets.GIST_TOKEN }}
+          COINGLASS_API_KEY:    ${{ secrets.COINGLASS_API_KEY }}
         run: node strategic-agent.js
