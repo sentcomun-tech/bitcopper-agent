@@ -416,23 +416,16 @@ async function fetchETFFlows(state) {
   async function pull(url) {
     try {
       const d = await get(url, false, headers);
-      // DIAGNÓSTICO TEMPORAL: ver qué llega realmente desde el runner
-      const tipo = Array.isArray(d) ? "array"
-        : typeof d === "object" ? `objeto(claves: ${Object.keys(d||{}).slice(0,5).join(",")})`
-        : typeof d === "string" ? `string(${d.slice(0,120)})`
-        : typeof d;
-      console.log(`  🔍 ETF pull ${url.split("?")[0].split("/").slice(-2).join("/")} → ${tipo}`);
-      // Estructuras posibles: {data:[...]}, {data:{list:[...]}}, [...], {code,data:[...]}
+      // CoinGlass V4 envuelve la respuesta en {code, data:[...]}.
+      // Se contemplan variantes por robustez ante cambios de schema.
       const arr = Array.isArray(d) ? d
         : Array.isArray(d?.data) ? d.data
         : Array.isArray(d?.data?.list) ? d.data.list
         : Array.isArray(d?.data?.dataList) ? d.data.dataList
         : null;
-      if (!arr) console.log(`  🔍 ETF: no encontré array. Respuesta cruda: ${JSON.stringify(d).slice(0,200)}`);
-      else console.log(`  🔍 ETF: array de ${arr.length} registros. Primer campo flujo: ${JSON.stringify(arr[0]).slice(0,150)}`);
       return arr;
     } catch(e) {
-      console.log(`  🔍 ETF pull error: ${e.message?.slice(0,80)}`);
+      console.log(`  ⚠️ ETF pull error: ${e.message?.slice(0,60)}`);
       return null;
     }
   }
